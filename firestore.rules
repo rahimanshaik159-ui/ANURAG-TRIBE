@@ -1,0 +1,657 @@
+rules_version = '2';
+
+/*
+ * ANURAG TRIBE - Firestore security rules
+ * ------------------------------------------------------------------
+ * Principles
+ *  1. Privileged roles come ONLY from Firebase custom claims
+ *     (request.auth.token.role), which only Cloud Functions can set.
+ *  2. Tribe membership transitions (create tribe, accept/reject, invite,
+ *     remove, leave) are done by callable Cloud Functions, so the
+ *     `members` subcollection and `tribes` creation are CLIENT READ-ONLY.
+ *  3. Nothing here stores file binaries. Transfer / voice `signaling`
+ *     collections hold only temporary WebRTC handshake data.
+ *  4. Admins moderate through rules + callables but CANNOT read private
+ *     Tribe chat or private help-request chat. Reported tribe messages are
+ *     reviewed from a snapshot that rules verify against the real message.
+ *  5. Counters (likeCount, memberCount, ...) are written by functions only.
+ *
+ * NOTE: these rules are written to be tested with the Firebase emulator
+ * (see tests/rules). Queries MUST include the same constraints the rules
+ * check (e.g. visibility == 'campus', privacy == 'public').
+ */
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------ helpers
+    function signedIn() { return request.auth != null; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function verified() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.get('suspended', false) != true;
+    }
+    function isSuper() {
+  return verified()
+    && request.auth.uid == 'o5fX7pb3qbRTpA2GGE9SeBVL2up2';
+}
+
+function isAdmin() {
+  return isSuper()
+    || (verified()
+      && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+      && get(/databases/$(database)/documents/users/$(request.auth.uid))
+           .data.get('role', 'user') == 'admin');
+}
+
+    function str(v, mn, mx) { return v is string && v.size() >= mn && v.size() <= mx; }
+    function optStr(d, k, mx) { return !(k in d) || d[k] == null || str(d[k], 0, mx); }
+    function httpsUrl(v) { return v is string && v.size() <= 500 && v.matches('^https?://[^ ]+$'); }
+    function optUrl(d, k) { return !(k in d) || d[k] == null || d[k] == '' || httpsUrl(d[k]); }
+    function listMax(v, mx) { return v is list && v.size() <= mx; }
+    function onlyKeys(allowed) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowed);
+    }
+    function tribePath(tribeId) { return /databases/$(database)/documents/tribes/$(tribeId); }
+    function memberPath(tribeId, uid) { return /databases/$(database)/documents/tribes/$(tribeId)/members/$(uid); }
+
+    function tribeMember(tribeId) {
+      return verified()
+        && exists(memberPath(tribeId, request.auth.uid))
+        && get(memberPath(tribeId, request.auth.uid)).data.status == 'active';
+    }
+    function tribeLeader(tribeId) {
+      return tribeMember(tribeId)
+        && get(memberPath(tribeId, request.auth.uid)).data.role in ['owner', 'moderator'];
+    }
+    function userIsTribeMember(tribeId, uid) {
+      return exists(memberPath(tribeId, uid))
+        && get(memberPath(tribeId, uid)).data.status == 'active';
+    }
+
+    // ------------------------------------------------------- usernames
+    // Public get so the registration form can check availability.
+    match /usernames/{name} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if signedIn()
+        && name.matches('^[a-z0-9_]{3,20}$')
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // ------------------------------------------------------------ users
+    function validProfile(d) {
+      return str(d.name, 2, 60)
+        && d.nameLower == d.name.lower()
+        && str(d.username, 3, 20) && d.username.matches('^[a-z0-9_]{3,20}$')
+        && str(d.department, 1, 40)
+        && d.year is int && d.year >= 1 && d.year <= 5
+        && optStr(d, 'section', 4)
+        && optStr(d, 'bio', 300)
+        && d.avatar is map && d.avatar.type in ['preset', 'url', 'none']
+        && (d.avatar.type != 'preset' || (d.avatar.id is string && d.avatar.id.matches('^avatar([1-9]|[1-4][0-9]|50)$')))
+        && (d.avatar.type != 'url' || httpsUrl(d.avatar.get('url', '')))
+        && listMax(d.skills, 15) && listMax(d.interests, 15) && listMax(d.learning, 10)
+        && listMax(d.lookingFor, 10) && listMax(d.currentProjects, 5)
+        && d.availability in ['open', 'busy', 'none']
+        && d.social is map
+        && optUrl(d.social, 'instagram') && optUrl(d.social, 'youtube') && optUrl(d.social, 'twitter')
+        && optUrl(d.social, 'linkedin') && optUrl(d.social, 'github') && optUrl(d.social, 'portfolio')
+        && optUrl(d.social, 'other')
+        && d.visibility in ['campus', 'hidden'];
+    }
+    function userRequired() {
+      return ['uid','name','nameLower','username','department','year','avatar','skills','interests',
+              'learning','lookingFor','currentProjects','availability','social','visibility','createdAt','updatedAt'];
+    }
+    function userEditable() {
+      return ['name','nameLower','username','department','year','section','bio','avatar','skills','interests',
+              'learning','lookingFor','currentProjects','availability','social','visibility','updatedAt'];
+    }
+
+    match /users/{uid} {
+      allow get: if isSelf(uid) || (verified() && (resource.data.visibility == 'campus' || isAdmin()));
+      // Directory queries MUST filter visibility == 'campus' (admins may list all).
+      allow list: if verified() && (resource.data.visibility == 'campus' || isAdmin());
+      // Created right after sign-up (email not verified yet).
+      allow create: if isSelf(uid)
+        && request.resource.data.keys().hasAll(userRequired())
+        && request.resource.data.keys().hasOnly(userRequired().concat(['section', 'bio']))
+        && request.resource.data.uid == uid
+        && request.resource.data.createdAt == request.time
+        && validProfile(request.resource.data)
+        && existsAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username))
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == uid;
+      // Users can update their own profile, but cannot assign roles.
+allow update: if verified()
+  && (
+    (
+      isSelf(uid)
+      && onlyKeys(userEditable())
+      && validProfile(request.resource.data)
+      && request.resource.data.updatedAt == request.time
+      && (
+        request.resource.data.username == resource.data.username
+        || getAfter(
+          /databases/$(database)/documents/usernames/$(request.resource.data.username)
+        ).data.uid == uid
+      )
+    )
+    ||
+    (
+      isSuper()
+      && onlyKeys(['role'])
+      && request.resource.data.get('role', 'user') in ['user', 'admin']
+    )
+  );
+  allow delete: if false;
+    }
+
+    match /userPrivate/{uid} {
+      allow read: if isSelf(uid);
+      allow create, update: if isSelf(uid)
+        && request.resource.data.keys().hasOnly(['emailNotifications', 'emailAnnouncements', 'updatedAt'])
+        && request.resource.data.emailNotifications is bool
+        && request.resource.data.emailAnnouncements is bool;
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------- settings
+    match /settings/{docId} {
+      allow get: if docId == 'taxonomy' || verified();
+      allow list: if false;
+      allow write: if (docId == 'taxonomy' && isAdmin()) || (docId == 'platform' && isSuper());
+    }
+
+    // ----------------------------------------------------------- tribes
+    function validTribe(d) {
+      return str(d.name, 3, 40) && d.nameLower == d.name.lower()
+        && str(d.description, 10, 500)
+        && optStr(d, 'goal', 200)
+        && str(d.category, 2, 30)
+        && listMax(d.skills, 12) && listMax(d.interests, 12)
+        && d.privacy in ['public', 'private']
+        && d.idealMemberCount is int && d.idealMemberCount >= 2 && d.idealMemberCount <= 12
+        && optStr(d, 'projectFocus', 100);
+    }
+
+    match /tribes/{tribeId} {
+      allow get: if verified() && (resource.data.privacy == 'public' || tribeMember(tribeId) || isAdmin());
+      // Discovery queries MUST filter privacy == 'public' (admins may list all).
+      allow list: if verified() && (resource.data.privacy == 'public' || isAdmin());
+      allow create: if false;   // createTribe callable
+      allow update: if verified() && tribeLeader(tribeId)
+        && resource.data.status == 'active'
+        && onlyKeys(['name','nameLower','description','goal','category','skills','interests',
+                     'privacy','idealMemberCount','projectFocus','updatedAt'])
+        && validTribe(request.resource.data);
+      allow delete: if false;
+
+      match /members/{uid} {
+        allow read: if verified() && (
+          tribeMember(tribeId) || isAdmin()
+          || get(tribePath(tribeId)).data.privacy == 'public');
+        // A member may only bump their own lastReadAt.
+        allow update: if verified() && isSelf(uid) && resource.data.status == 'active'
+          && onlyKeys(['lastReadAt']);
+        allow create, delete: if false;  // callables only
+      }
+
+      match /joinRequests/{uid} {
+        allow read: if verified() && (isSelf(uid) || tribeLeader(tribeId));
+        allow create: if verified() && isSelf(uid)
+          && request.resource.data.keys().hasOnly(['requestId','uid','message','status','createdAt','updatedAt'])
+          && request.resource.data.uid == uid && request.resource.data.requestId == uid
+          && request.resource.data.status == 'pending'
+          && str(request.resource.data.message, 0, 300)
+          && request.resource.data.createdAt == request.time
+          && get(tribePath(tribeId)).data.privacy == 'public'
+          && get(tribePath(tribeId)).data.status == 'active'
+          && !userIsTribeMember(tribeId, uid);
+        // Requester may cancel a pending request or re-open a closed one.
+        allow update: if verified() && isSelf(uid)
+          && onlyKeys(['status', 'message', 'updatedAt'])
+          && ((resource.data.status == 'pending' && request.resource.data.status == 'cancelled')
+              || (resource.data.status in ['rejected', 'cancelled', 'accepted']
+                  && request.resource.data.status == 'pending'
+                  && !userIsTribeMember(tribeId, uid)))
+          && str(request.resource.data.message, 0, 300)
+          && request.resource.data.updatedAt == request.time;
+        allow delete: if false;
+      }
+
+      match /messages/{messageId} {
+        allow read: if tribeMember(tribeId);
+        allow create: if tribeMember(tribeId)
+          && get(tribePath(tribeId)).data.status == 'active'
+          && request.resource.data.keys().hasOnly(['senderUid','text','type','linkUrl','linkHost','linkProvider','replyTo','createdAt'])
+          && request.resource.data.keys().hasAll(['senderUid','text','type','createdAt'])
+          && request.resource.data.senderUid == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && str(request.resource.data.text, 1, 2000)
+          && request.resource.data.type in ['text', 'link']
+          && (request.resource.data.type == 'text' || httpsUrl(request.resource.data.get('linkUrl', '')))
+          && optStr(request.resource.data, 'linkHost', 100)
+          && optStr(request.resource.data, 'linkProvider', 20)
+          && (!('replyTo' in request.resource.data) || (request.resource.data.replyTo is map
+              && request.resource.data.replyTo.keys().hasOnly(['id','senderUid','snippet'])
+              && str(request.resource.data.replyTo.snippet, 0, 140)));
+        // Sender edits/deletes own message; leaders may only hide (delete) it.
+        allow update: if tribeMember(tribeId)
+          && ((resource.data.senderUid == request.auth.uid
+                && onlyKeys(['text', 'editedAt', 'deleted'])
+                && str(request.resource.data.text, 0, 2000)
+                && (!('editedAt' in request.resource.data.diff(resource.data).affectedKeys()) || request.resource.data.editedAt == request.time))
+              || (tribeLeader(tribeId)
+                && onlyKeys(['text', 'deleted', 'deletedBy'])
+                && request.resource.data.deleted == true
+                && request.resource.data.deletedBy == request.auth.uid
+                && request.resource.data.text == ''));
+        allow delete: if false;
+      }
+
+      // Lightweight presence heartbeat (online/offline indicator).
+      match /presence/{uid} {
+        allow read: if tribeMember(tribeId);
+        allow create, update: if isSelf(uid) && tribeMember(tribeId)
+          && request.resource.data.keys().hasOnly(['uid', 'lastSeen'])
+          && request.resource.data.uid == uid
+          && request.resource.data.lastSeen == request.time;
+        allow delete: if isSelf(uid);
+      }
+    }
+
+    // Membership / join requests across all Tribes for "My Tribes" views.
+    match /{path=**}/members/{uid} {
+      allow read: if verified() && resource.data.uid == request.auth.uid;
+    }
+    match /{path=**}/joinRequests/{uid} {
+      allow read: if verified() && resource.data.uid == request.auth.uid;
+    }
+
+    match /tribeInvites/{inviteId} {
+      allow read: if verified() && (resource.data.inviteeUid == request.auth.uid
+                                    || resource.data.inviterUid == request.auth.uid);
+      allow write: if false;   // callables only
+    }
+
+    // ------------------------------------------------------ voice rooms
+    // WebRTC AUDIO signaling only. Nothing is recorded or stored.
+    match /tribeVoiceRooms/{roomId} {
+      allow read: if tribeMember(resource.data.tribeId);
+      allow create: if tribeMember(request.resource.data.tribeId)
+        && request.resource.data.keys().hasOnly(['tribeId','createdBy','status','createdAt','expiresAt'])
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.status == 'active'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(6, 'h');
+      // End the room: its creator or a Tribe leader.
+      allow update: if tribeMember(resource.data.tribeId)
+        && (resource.data.createdBy == request.auth.uid || tribeLeader(resource.data.tribeId))
+        && onlyKeys(['status', 'endedAt'])
+        && request.resource.data.status == 'ended';
+      allow delete: if false;
+
+      match /participants/{uid} {
+        allow read: if tribeMember(get(/databases/$(database)/documents/tribeVoiceRooms/$(roomId)).data.tribeId);
+        allow create, update: if isSelf(uid)
+          && tribeMember(get(/databases/$(database)/documents/tribeVoiceRooms/$(roomId)).data.tribeId)
+          && get(/databases/$(database)/documents/tribeVoiceRooms/$(roomId)).data.status == 'active'
+          && request.resource.data.keys().hasOnly(['uid','joinedAt','lastSeen','muted','sessionId'])
+          && request.resource.data.uid == uid
+          && request.resource.data.muted is bool
+          && request.resource.data.lastSeen == request.time;
+        allow delete: if isSelf(uid)
+          || tribeLeader(get(/databases/$(database)/documents/tribeVoiceRooms/$(roomId)).data.tribeId);
+      }
+
+      match /signaling/{sigId} {
+        allow read: if verified() && resource.data.to == request.auth.uid;
+        allow create: if verified()
+          && request.resource.data.keys().hasOnly(['from','to','kind','payload','session','createdAt'])
+          && request.resource.data.from == request.auth.uid
+          && request.resource.data.kind in ['offer', 'answer', 'candidate', 'bye']
+          && request.resource.data.payload is string && request.resource.data.payload.size() < 20000
+          && request.resource.data.createdAt == request.time
+          && userIsTribeMember(get(/databases/$(database)/documents/tribeVoiceRooms/$(roomId)).data.tribeId, request.auth.uid)
+          && userIsTribeMember(get(/databases/$(database)/documents/tribeVoiceRooms/$(roomId)).data.tribeId, request.resource.data.to);
+        allow delete: if verified() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
+        allow update: if false;
+      }
+    }
+
+    // ------------------------------------------- direct file-transfer (P2P)
+    // LOCKED ARCHITECTURE: only temporary metadata + WebRTC signaling here.
+    // File bytes travel browser-to-browser over a WebRTC DataChannel.
+    function fileOk(f) {
+      return f is map && f.size is int && f.size > 0 && f.size <= 524288000
+        && str(f.name, 1, 200) && f.keys().hasOnly(['name', 'size', 'type'])
+        && optStr(f, 'type', 100);
+    }
+    function filesOk(files, total) {
+      return files is list && files.size() >= 1 && files.size() <= 3
+        && fileOk(files[0])
+        && (files.size() < 2 || fileOk(files[1]))
+        && (files.size() < 3 || fileOk(files[2]))
+        && total == files[0].size
+                     + (files.size() >= 2 ? files[1].size : 0)
+                     + (files.size() >= 3 ? files[2].size : 0)
+        && total <= 524288000;
+    }
+    function transferContextOk(d) {
+      return (d.contextType == 'helpRequest'
+              && get(/databases/$(database)/documents/helpRequests/$(d.contextId)).data.status == 'accepted'
+              && d.senderUid in get(/databases/$(database)/documents/helpRequests/$(d.contextId)).data.participants
+              && d.recipientUid in get(/databases/$(database)/documents/helpRequests/$(d.contextId)).data.participants)
+          || (d.contextType == 'tribe'
+              && userIsTribeMember(d.contextId, d.senderUid)
+              && userIsTribeMember(d.contextId, d.recipientUid));
+    }
+    function transferTransitionOk(oldD, newD) {
+      return (oldD.status == 'pending' && request.auth.uid == oldD.recipientUid && newD.status in ['accepted', 'rejected'])
+          || (oldD.status == 'pending' && request.auth.uid == oldD.senderUid && newD.status == 'cancelled')
+          || (oldD.status in ['accepted', 'connecting', 'transferring']
+              && newD.status in ['accepted', 'connecting', 'transferring', 'completed', 'failed', 'cancelled'])
+          || (oldD.status == 'failed' && request.auth.uid == oldD.senderUid && newD.status == 'accepted');
+    }
+
+    match /transferSessions/{transferId} {
+      allow read: if verified() && (resource.data.senderUid == request.auth.uid
+                                    || resource.data.recipientUid == request.auth.uid);
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['senderUid','recipientUid','contextType','contextId','files','totalBytes','status','attempt','createdAt','updatedAt','expiresAt'])
+        && request.resource.data.senderUid == request.auth.uid
+        && request.resource.data.recipientUid != request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.attempt == 1
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(48, 'h')
+        && filesOk(request.resource.data.files, request.resource.data.totalBytes)
+        && transferContextOk(request.resource.data);
+      allow update: if verified()
+        && (resource.data.senderUid == request.auth.uid || resource.data.recipientUid == request.auth.uid)
+        && onlyKeys(['status','attempt','failureReason','updatedAt','respondedAt','completedAt'])
+        && transferTransitionOk(resource.data, request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if verified() && (resource.data.senderUid == request.auth.uid || resource.data.recipientUid == request.auth.uid)
+        && resource.data.status in ['completed', 'rejected', 'cancelled', 'failed', 'expired'];
+
+      match /signaling/{sigId} {
+        allow read: if verified() && resource.data.to == request.auth.uid;
+        allow create: if verified()
+          && request.resource.data.keys().hasOnly(['from','to','kind','payload','attempt','createdAt'])
+          && request.resource.data.from == request.auth.uid
+          && request.resource.data.kind in ['offer', 'answer', 'candidate', 'bye']
+          && request.resource.data.payload is string && request.resource.data.payload.size() < 20000
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.to in [
+               get(/databases/$(database)/documents/transferSessions/$(transferId)).data.senderUid,
+               get(/databases/$(database)/documents/transferSessions/$(transferId)).data.recipientUid]
+          && request.auth.uid in [
+               get(/databases/$(database)/documents/transferSessions/$(transferId)).data.senderUid,
+               get(/databases/$(database)/documents/transferSessions/$(transferId)).data.recipientUid];
+        allow delete: if verified() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
+        allow update: if false;
+      }
+    }
+
+    // ----------------------------------------------------- help requests
+    function helpParticipant(reqId) {
+      return verified() && request.auth.uid in get(/databases/$(database)/documents/helpRequests/$(reqId)).data.participants;
+    }
+    function helpFieldsOk(d) {
+      return str(d.title, 4, 100) && str(d.description, 10, 800)
+        && listMax(d.skillsNeeded, 8)
+        && (d.tribeId == null || (d.tribeId is string))
+        && d.isOpen is bool;
+    }
+
+    match /helpRequests/{reqId} {
+      // Private between participants; open-board requests are visible to students.
+      allow read: if verified() && (request.auth.uid in resource.data.participants || resource.data.isOpen == true);
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['requesterUid','targetUid','helperUid','title','description','skillsNeeded','tribeId','isOpen','participants','status','createdAt','updatedAt'])
+        && request.resource.data.requesterUid == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && helpFieldsOk(request.resource.data)
+        && (request.resource.data.targetUid == null
+              ? (request.resource.data.participants == [request.auth.uid] && request.resource.data.isOpen == true)
+              : (request.resource.data.targetUid != request.auth.uid
+                 && request.resource.data.participants == [request.auth.uid, request.resource.data.targetUid]
+                 && request.resource.data.isOpen == false));
+      allow update: if verified() && request.resource.data.updatedAt == request.time && (
+          // requester cancels, or completes an accepted request
+          (resource.data.requesterUid == request.auth.uid
+            && onlyKeys(['status', 'isOpen', 'updatedAt'])
+            && ((resource.data.status in ['open', 'accepted'] && request.resource.data.status == 'cancelled')
+                || (resource.data.status == 'accepted' && request.resource.data.status == 'completed'))
+            && request.resource.data.isOpen == false)
+          // targeted person accepts / declines
+          || (resource.data.targetUid == request.auth.uid
+            && onlyKeys(['status', 'updatedAt'])
+            && resource.data.status == 'open'
+            && request.resource.data.status in ['accepted', 'declined'])
+          // someone volunteers on an open-board request
+          || (resource.data.isOpen == true && resource.data.targetUid == null
+            && resource.data.requesterUid != request.auth.uid
+            && onlyKeys(['status', 'isOpen', 'helperUid', 'participants', 'updatedAt'])
+            && request.resource.data.status == 'accepted'
+            && request.resource.data.isOpen == false
+            && request.resource.data.helperUid == request.auth.uid
+            && request.resource.data.participants == [resource.data.requesterUid, request.auth.uid])
+        );
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        allow read: if helpParticipant(reqId);
+        allow create: if helpParticipant(reqId)
+          && get(/databases/$(database)/documents/helpRequests/$(reqId)).data.status in ['open', 'accepted']
+          && request.resource.data.keys().hasOnly(['senderUid', 'text', 'createdAt'])
+          && request.resource.data.senderUid == request.auth.uid
+          && str(request.resource.data.text, 1, 1500)
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    // ------------------------------------------------ projects (+ Tribes)
+    // One project system: Tribe projects are `projects` docs with tribeId set.
+    function projectFieldsOk(d) {
+      return str(d.title, 4, 100) && str(d.description, 10, 1500)
+        && str(d.category, 2, 30)
+        && d.status in ['idea', 'planning', 'in_progress', 'completed', 'archived']
+        && listMax(d.skillsNeeded, 10) && listMax(d.links, 8) && listMax(d.assignments, 20)
+        && d.visibility in ['campus', 'tribe']
+        && listMax(d.memberUids, 40);
+    }
+    function projectReadable(d) {
+      return d.visibility == 'campus'
+        || (d.get('tribeId', null) != null && tribeMember(d.tribeId));
+    }
+
+    match /projects/{projectId} {
+      allow get: if verified() && (projectReadable(resource.data) || isAdmin());
+      allow list: if verified() && (projectReadable(resource.data) || isAdmin());
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['ownerUid','title','description','category','skillsNeeded','links','assignments','visibility','tribeId','tribeName','memberUids','status','likeCount','commentCount','applicationCount','createdAt','updatedAt'])
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.likeCount == 0 && request.resource.data.commentCount == 0
+        && request.resource.data.applicationCount == 0
+        && projectFieldsOk(request.resource.data)
+        && (request.resource.data.tribeId == null
+              ? request.resource.data.visibility == 'campus'
+              : tribeMember(request.resource.data.tribeId));
+      // Owner, any member of the owning Tribe, or an admin (moderation) may edit.
+      allow update: if verified() && request.resource.data.updatedAt == request.time
+        && onlyKeys(['title','description','category','skillsNeeded','links','assignments','visibility','memberUids','status','updatedAt'])
+        && projectFieldsOk(request.resource.data)
+        && (resource.data.ownerUid == request.auth.uid
+            || (resource.data.get('tribeId', null) != null && tribeMember(resource.data.tribeId))
+            || isAdmin());
+      allow delete: if verified() && (resource.data.ownerUid == request.auth.uid || isAdmin());
+
+      match /likes/{uid} {
+        allow read: if isSelf(uid) && verified();
+        allow create: if isSelf(uid) && verified() && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+          && request.resource.data.uid == uid && request.resource.data.createdAt == request.time;
+        allow delete: if isSelf(uid) && verified();
+        allow update: if false;
+      }
+    }
+
+    match /applications/{appId} {
+      allow read: if verified() && (resource.data.applicantUid == request.auth.uid || resource.data.ownerUid == request.auth.uid);
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['projectId','projectTitle','ownerUid','applicantUid','message','status','createdAt','updatedAt'])
+        && request.resource.data.applicantUid == request.auth.uid
+        && request.resource.data.ownerUid != request.auth.uid
+        && request.resource.data.status == 'pending'
+        && str(request.resource.data.message, 0, 500)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && get(/databases/$(database)/documents/projects/$(request.resource.data.projectId)).data.ownerUid == request.resource.data.ownerUid
+        && get(/databases/$(database)/documents/projects/$(request.resource.data.projectId)).data.visibility == 'campus';
+      allow update: if verified() && onlyKeys(['status', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && ((resource.data.ownerUid == request.auth.uid && request.resource.data.status in ['accepted', 'rejected'])
+            || (resource.data.applicantUid == request.auth.uid && request.resource.data.status == 'withdrawn'));
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------- posts / comments
+    match /posts/{postId} {
+      allow read: if verified() && (resource.data.status == 'visible' || isAdmin() || resource.data.authorUid == request.auth.uid);
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['authorUid','category','text','linkUrl','status','likeCount','commentCount','createdAt'])
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.category in ['idea','project','collaboration','creation','startup','opportunity','achievement']
+        && str(request.resource.data.text, 3, 1500)
+        && optUrl(request.resource.data, 'linkUrl')
+        && request.resource.data.status == 'visible'
+        && request.resource.data.likeCount == 0 && request.resource.data.commentCount == 0
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin() && onlyKeys(['status']);
+      allow delete: if verified() && (resource.data.authorUid == request.auth.uid || isAdmin());
+
+      match /likes/{uid} {
+        allow read: if isSelf(uid) && verified();
+        allow create: if isSelf(uid) && verified() && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+          && request.resource.data.uid == uid && request.resource.data.createdAt == request.time;
+        allow delete: if isSelf(uid) && verified();
+        allow update: if false;
+      }
+    }
+
+    match /comments/{commentId} {
+      allow read: if verified();
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['targetType','targetId','authorUid','text','createdAt'])
+        && request.resource.data.targetType in ['post', 'project']
+        && request.resource.data.authorUid == request.auth.uid
+        && str(request.resource.data.text, 1, 500)
+        && request.resource.data.createdAt == request.time;
+      allow delete: if verified() && (resource.data.authorUid == request.auth.uid || isAdmin());
+      allow update: if false;
+    }
+
+    match /users/{uid}/saved/{postId} {
+      allow read, create, delete: if isSelf(uid) && verified();
+      allow update: if false;
+    }
+
+    // --------------------------------------------------------- showcase
+    // Public once approved. Instagram/social promotion needs explicit
+    // consent + manual admin review; nothing is ever auto-posted.
+    match /showcase/{itemId} {
+      allow read: if resource.data.status == 'approved'
+        || (verified() && (resource.data.authorUid == request.auth.uid || isAdmin()));
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['authorUid','title','description','category','links','tribeId','projectId','status','featureConsent','consentAt','adminNote','createdAt','updatedAt'])
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && str(request.resource.data.title, 3, 100) && str(request.resource.data.description, 10, 1000)
+        && str(request.resource.data.category, 2, 30)
+        && listMax(request.resource.data.links, 6)
+        && request.resource.data.featureConsent is bool
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if verified() && request.resource.data.updatedAt == request.time
+        && ((resource.data.authorUid == request.auth.uid && resource.data.status == 'pending'
+              && onlyKeys(['title','description','category','links','featureConsent','consentAt','updatedAt']))
+            || (isAdmin() && onlyKeys(['status','adminNote','updatedAt'])
+                && request.resource.data.status in ['pending', 'approved', 'rejected']));
+      allow delete: if verified() && (resource.data.authorUid == request.auth.uid || isAdmin());
+    }
+
+    // ----------------------------------------------------- events/resources
+    match /events/{eventId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+      match /registrations/{uid} {
+        allow read: if isSelf(uid) && verified() || isAdmin();
+        allow create: if isSelf(uid) && verified()
+          && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+          && request.resource.data.uid == uid && request.resource.data.createdAt == request.time
+          && get(/databases/$(database)/documents/events/$(eventId)).data.registrationOpen == true;
+        allow delete: if isSelf(uid) && verified();
+        allow update: if false;
+      }
+    }
+
+    match /resources/{resourceId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /announcements/{annId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ----------------------------------------------------- notifications
+    // Created ONLY by Cloud Functions. Users may mark read / delete their own.
+    match /notifications/{notifId} {
+      allow read: if verified() && resource.data.uid == request.auth.uid;
+      allow update: if verified() && resource.data.uid == request.auth.uid && onlyKeys(['read']);
+      allow delete: if verified() && resource.data.uid == request.auth.uid;
+      allow create: if false;
+    }
+
+    // ---------------------------------------------------------- reports
+    match /reports/{reportId} {
+      allow read: if verified() && (resource.data.reporterUid == request.auth.uid || isAdmin());
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['reporterUid','targetType','targetId','tribeId','snapshot','reason','details','status','createdAt'])
+        && request.resource.data.reporterUid == request.auth.uid
+        && request.resource.data.targetType in ['post','comment','project','tribe','tribeMessage','user','showcase']
+        && str(request.resource.data.targetId, 1, 128)
+        && request.resource.data.reason in ['spam','harassment','inappropriate','misinformation','privacy','other']
+        && str(request.resource.data.details, 0, 500)
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time
+        // A reported Tribe message must be real and visible to the reporter;
+        // the snapshot lets admins review it WITHOUT blanket chat access.
+        && (request.resource.data.targetType != 'tribeMessage'
+            || (tribeMember(request.resource.data.tribeId)
+                && request.resource.data.snapshot.text ==
+                   get(/databases/$(database)/documents/tribes/$(request.resource.data.tribeId)/messages/$(request.resource.data.targetId)).data.text));
+      allow update: if isAdmin() && onlyKeys(['status', 'resolution', 'handledBy', 'handledAt'])
+        && request.resource.data.status in ['open', 'reviewing', 'resolved', 'dismissed'];
+      allow delete: if false;
+    }
+
+    // Email delivery logs and everything else: backend only.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

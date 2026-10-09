@@ -1,0 +1,21 @@
+{
+  "name": "anurag-tribe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ANURAG TRIBE - student collaboration, discovery and Tribe platform",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/unit/*.test.js",
+    "check": "node scripts/static-check.mjs",
+    "test:rules": "firebase emulators:exec --only firestore \"node --test tests/rules/*.test.js\"",
+    "serve": "firebase emulators:start",
+    "deploy": "firebase deploy"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase-tools": "^13.29.0"
+  },
+  "dependencies": {
+    "firebase": "^11.10.0"
+  }
+}
