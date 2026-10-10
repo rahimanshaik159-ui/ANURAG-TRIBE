@@ -66,8 +66,7 @@ boot({ require: 'user' }, async (ctx) => {
     });
     view.append(h('div', { class: 'card stack' }, h('div', { class: 'form-grid' }, field('Send in context of', ctxSel), field('To', who)), drop, input_, list, errs, h('div', { class: 'row', style: { justifyContent: 'flex-end' } }, send)));
   }
-  const history_replace = (id) => history.replaceState(null, '', `transfer.html?id=${id}`);
-
+  const history_replace = (id) => window.history.replaceState(null, '', `transfer.html?id=${id}`);
   // ------------------------------------------------------------ history
   async function history() {
     clear(view); view.append(skeletonGrid(3));

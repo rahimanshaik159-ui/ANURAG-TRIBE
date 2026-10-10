@@ -49,10 +49,36 @@ export class TransferSender {
     dc.onopen = () => { clearTimeout(this.connTimer); this._emit('waiting', 'Connected. Waiting for the recipient to be ready...'); this._hello(); };
     dc.onmessage = (e) => this._onControl(e.data);
 
-    pc.onicecandidate = (e) => { if (e.candidate) this.signaling.send(this.peer, 'candidate', e.candidate.toJSON()).catch(() => {}); };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') this._fail('Could not establish a direct connection. Your networks may block peer-to-peer links (a TURN relay server is needed for that). You can retry.');
-    };
+   
+pc.onicecandidate = (e) => {
+  if (e.candidate) {
+    this.signaling
+      .send(this.peer, 'candidate', e.candidate.toJSON())
+      .catch((err) => {
+        console.error('[Transfer] Failed to send ICE candidate:', err);
+      });
+  } else {
+    console.log('[Transfer] ICE candidate gathering complete');
+  }
+};
+
+    pc.oniceconnectionstatechange = () => {
+  console.log('[Transfer] ICE state:', pc.iceConnectionState);
+};
+
+pc.onicegatheringstatechange = () => {
+  console.log('[Transfer] ICE gathering:', pc.iceGatheringState);
+};
+
+pc.onconnectionstatechange = () => {
+  console.log('[Transfer] Connection state:', pc.connectionState);
+
+  if (pc.connectionState === 'failed') {
+    this._fail(
+      'Direct connection failed. Check both devices and networks, then retry. This setup does not use a TURN relay.'
+    );
+  }
+};
     this.signaling.listen(async (m) => {
       if (m.kind === 'answer') { await pc.setRemoteDescription(m.payload); await this.cands.flush(); }
       else if (m.kind === 'candidate') await this.cands.add(m.payload);
