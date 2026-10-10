@@ -182,7 +182,32 @@ allow update: if verified()
       allow get: if verified() && (resource.data.privacy == 'public' || tribeMember(tribeId) || isAdmin());
       // Discovery queries MUST filter privacy == 'public' (admins may list all).
       allow list: if verified() && (resource.data.privacy == 'public' || isAdmin());
-      allow create: if false;   // createTribe callable
+      
+allow create: if verified()
+  && request.resource.data.keys().hasAll([
+    'name', 'nameLower', 'description', 'goal', 'category',
+    'skills', 'interests', 'privacy', 'idealMemberCount',
+    'projectFocus', 'creatorUid', 'memberCount', 'status',
+    'createdAt', 'updatedAt', 'lastActivityAt'
+  ])
+  && request.resource.data.keys().hasOnly([
+    'name', 'nameLower', 'description', 'goal', 'category',
+    'skills', 'interests', 'privacy', 'idealMemberCount',
+    'projectFocus', 'creatorUid', 'memberCount', 'status',
+    'createdAt', 'updatedAt', 'lastActivityAt'
+  ])
+  && validTribe(request.resource.data)
+  && request.resource.data.creatorUid == request.auth.uid
+  && request.resource.data.memberCount == 1
+  && request.resource.data.status == 'active'
+  && request.resource.data.createdAt == request.time
+  && request.resource.data.updatedAt == request.time
+  && request.resource.data.lastActivityAt == request.time
+  && !exists(memberPath(tribeId, request.auth.uid))
+  && getAfter(memberPath(tribeId, request.auth.uid)).data.uid == request.auth.uid
+  && getAfter(memberPath(tribeId, request.auth.uid)).data.role == 'owner'
+  && getAfter(memberPath(tribeId, request.auth.uid)).data.status == 'active';
+
       allow update: if verified() && tribeLeader(tribeId)
         && resource.data.status == 'active'
         && onlyKeys(['name','nameLower','description','goal','category','skills','interests',
@@ -197,7 +222,23 @@ allow update: if verified()
         // A member may only bump their own lastReadAt.
         allow update: if verified() && isSelf(uid) && resource.data.status == 'active'
           && onlyKeys(['lastReadAt']);
-        allow create, delete: if false;  // callables only
+        
+allow create: if verified()
+  && isSelf(uid)
+  && !exists(tribePath(tribeId))
+  && request.resource.data.keys().hasOnly([
+    'uid', 'role', 'status', 'joinedAt', 'lastReadAt'
+  ])
+  && request.resource.data.uid == uid
+  && request.resource.data.role == 'owner'
+  && request.resource.data.status == 'active'
+  && request.resource.data.joinedAt == request.time
+  && request.resource.data.lastReadAt == request.time
+  && getAfter(tribePath(tribeId)).data.creatorUid == uid
+  && getAfter(tribePath(tribeId)).data.status == 'active';
+
+allow delete: if false;
+
       }
 
       match /joinRequests/{uid} {

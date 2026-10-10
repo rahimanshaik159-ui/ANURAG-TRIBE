@@ -1,6 +1,6 @@
 // Tribes: discovery, membership views, join requests, settings, presence.
 // Membership CHANGES go through Cloud Functions (callFn) - see functions/src/tribes.js.
-import { F, db, callFn } from '../core/firebase.js';
+import { F, db, auth, callFn } from '../core/firebase.js';
 import { page, withId, col, getOne } from './_util.js';
 import { APP } from '../config/app-config.js';
 
@@ -71,7 +71,51 @@ export const updateTribe = (tribeId, fields) => F.updateDoc(F.doc(db, 'tribes', 
 export const markRead = (tribeId, uid) => F.updateDoc(F.doc(db, 'tribes', tribeId, 'members', uid), { lastReadAt: F.serverTimestamp() }).catch(() => {});
 
 // Cloud Function wrappers (atomic, server-checked membership transitions)
-export const createTribe = (data) => callFn('createTribe', data);
+export async function createTribe(data) {
+  if (!db) {
+  throw new Error('Firebase is not configured.');
+}
+
+  const user = auth?.currentUser;
+  if (!user) {
+    throw new Error('Please sign in to create a Tribe.');
+  }
+
+  const profile = await F.getDoc(F.doc(db, 'users', user.uid));
+
+  if (!profile.exists() || !user.emailVerified) {
+    throw new Error('Please complete your profile and verify your email.');
+  }
+
+  const tribeRef = F.doc(F.collection(db, 'tribes'));
+  const memberRef = F.doc(db, 'tribes', tribeRef.id, 'members', user.uid);
+  const now = F.serverTimestamp();
+  const batch = F.writeBatch(db);
+
+  batch.set(tribeRef, {
+    ...data,
+    name: data.name.trim(),
+    nameLower: data.name.trim().toLowerCase(),
+    creatorUid: user.uid,
+    memberCount: 1,
+    status: 'active',
+    createdAt: now,
+    updatedAt: now,
+    lastActivityAt: now
+  });
+
+  batch.set(memberRef, {
+    uid: user.uid,
+    role: 'owner',
+    status: 'active',
+    joinedAt: now,
+    lastReadAt: now
+  });
+
+  await batch.commit();
+
+  return { tribeId: tribeRef.id };
+}
 export const respondToJoinRequest = (tribeId, uid, accept) => callFn('respondToJoinRequest', { tribeId, uid, accept });
 export const inviteToTribe = (tribeId, inviteeUid, message = '') => callFn('inviteToTribe', { tribeId, inviteeUid, message });
 export const respondToInvite = (inviteId, accept) => callFn('respondToInvite', { inviteId, accept });
