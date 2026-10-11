@@ -4,21 +4,36 @@ rules_version = '2';
  * ANURAG TRIBE - Firestore security rules
  * ------------------------------------------------------------------
  * Principles
- *  1. Privileged roles come ONLY from Firebase custom claims
- *     (request.auth.token.role), which only Cloud Functions can set.
- *  2. Tribe membership transitions (create tribe, accept/reject, invite,
- *     remove, leave) are done by callable Cloud Functions, so the
- *     `members` subcollection and `tribes` creation are CLIENT READ-ONLY.
+ *  1. Authorization comes from Firebase Auth (verified e-mail, the
+ *     `suspended` custom claim) and from Firestore data that only
+ *     privileged rule branches can write (users/{uid}.role, members.role).
+ *     The Super Admin is the single UID configured in isSuper().
+ *  2. Tribe membership is changed DIRECTLY by the client SDK, but every
+ *     transition is validated here (no Cloud Function is required):
+ *       - create Tribe          owner member doc + Tribe doc in one batch
+ *       - join                  leader accepts a request / invitee accepts
+ *                               an invitation (+ memberCount + marker)
+ *       - remove / leave        status change + memberCount - 1 + marker
+ *       - roles / ownership     owner only; transfer is a 3-doc atomic write
+ *       - archive               owner only
+ *     `memberCount` is NEVER freely writable: it may change only by +/-1,
+ *     in the same atomic write as the matching member document change,
+ *     and is named by `tribes/{id}.lastMembershipChange` ({uid, kind, at}).
+ *     That marker is what lets one rule check the other (see tribeJoinOk).
  *  3. Nothing here stores file binaries. Transfer / voice `signaling`
  *     collections hold only temporary WebRTC handshake data.
- *  4. Admins moderate through rules + callables but CANNOT read private
- *     Tribe chat or private help-request chat. Reported tribe messages are
- *     reviewed from a snapshot that rules verify against the real message.
- *  5. Counters (likeCount, memberCount, ...) are written by functions only.
+ *  4. Admins moderate through rules + two audited callables and CANNOT
+ *     read private Tribe chat or private help-request chat. Reported tribe
+ *     messages are reviewed from a snapshot that rules verify against the
+ *     real message.
+ *  5. Notifications, and the counters on posts/projects/events, are
+ *     written by Cloud Functions triggers only. Clients can never create
+ *     a notification, so recipients cannot be forged.
  *
- * NOTE: these rules are written to be tested with the Firebase emulator
- * (see tests/rules). Queries MUST include the same constraints the rules
- * check (e.g. visibility == 'campus', privacy == 'public').
+ * NOTE: these rules must be tested with the Firebase emulator before they
+ * are deployed (see tests/rules and README). Queries MUST include the same
+ * constraints the rules check (e.g. visibility == 'campus', privacy ==
+ * 'public').
  */
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -68,6 +83,7 @@ function isAdmin() {
       return exists(memberPath(tribeId, uid))
         && get(memberPath(tribeId, uid)).data.status == 'active';
     }
+
 
     // ------------------------------------------------------- usernames
     // Public get so the registration form can check availability.
@@ -166,7 +182,168 @@ allow update: if verified()
       allow write: if (docId == 'taxonomy' && isAdmin()) || (docId == 'platform' && isSuper());
     }
 
+    // ---- member / join-request helpers ----
+    function newMemberOk(uid) {
+      return request.resource.data.keys().hasOnly(['uid', 'role', 'status', 'joinedAt', 'lastReadAt'])
+        && request.resource.data.keys().hasAll(['uid', 'role', 'status', 'joinedAt', 'lastReadAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'member'
+        && request.resource.data.status == 'active'
+        && request.resource.data.joinedAt == request.time
+        && request.resource.data.lastReadAt == request.time;
+    }
+    function rejoinMemberOk(uid) {
+      return resource.data.status in ['left', 'removed']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'status', 'joinedAt', 'lastReadAt'])
+        && request.resource.data.role == 'member'
+        && request.resource.data.status == 'active'
+        && request.resource.data.joinedAt == request.time
+        && request.resource.data.lastReadAt == request.time;
+    }
+    function invitePendingFor(d, tribeId, uid) {
+      return d.status == 'pending' && d.inviteeUid == uid && d.tribeId == tribeId;
+    }
+    // Who may turn `uid` into an active member of the Tribe (create OR re-join).
+    function joinAuthorized(tribeId, uid) {
+      return get(tribePath(tribeId)).data.status == 'active'
+        && countAfterIs(tribeId, 1)
+        && mcIs(tribeId, 'join', uid)
+        && (
+          // (a) a Tribe leader accepts the person's pending join request
+          (uid != request.auth.uid
+            && isLeader(tribeId)
+            && exists(joinRequestPath(tribeId, uid))
+            && get(joinRequestPath(tribeId, uid)).data.status == 'pending'
+            && getAfter(joinRequestPath(tribeId, uid)).data.status == 'accepted')
+          // (b) the person accepts a pending invitation addressed to them
+          || (uid == request.auth.uid
+            && exists(invitePath(tribeId, uid))
+            && invitePendingFor(get(invitePath(tribeId, uid)).data, tribeId, uid)
+            && getAfter(invitePath(tribeId, uid)).data.status == 'accepted')
+        );
+    }
+    function leaderRespondsToRequest(tribeId, uid) {
+      return verified()
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['accepted', 'rejected']
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.requestId == resource.data.requestId
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && isLeader(tribeId)
+        // accepting must come with the member document becoming active in the same write
+        && (request.resource.data.status == 'rejected'
+            || (existsAfter(memberPath(tribeId, uid))
+                && getAfter(memberPath(tribeId, uid)).data.status == 'active'));
+    }
     // ----------------------------------------------------------- tribes
+    // ---- helpers for the membership model (see header, principle 2) ----
+    function joinRequestPath(tribeId, uid) {
+      return /databases/$(database)/documents/tribes/$(tribeId)/joinRequests/$(uid);
+    }
+    function invitePath(tribeId, uid) {
+      return /databases/$(database)/documents/tribeInvites/$(tribeId + '_' + uid);
+    }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function platformPath() { return /databases/$(database)/documents/settings/platform; }
+
+    // Hard member ceiling: settings/platform.tribeHardCap (editable by the Super Admin), default 30.
+    function platformCap() {
+      return exists(platformPath()) ? get(platformPath()).data.get('tribeHardCap', 30) : 30;
+    }
+
+    // Lean role checks: one exists() + one get() each (rules allow at most 10 access calls per operation).
+    function leaderOk(d) { return d.status == 'active' && d.role in ['owner', 'moderator']; }
+    function ownerOk(d) { return d.status == 'active' && d.role == 'owner'; }
+    function isLeader(tribeId) {
+      return verified() && exists(memberPath(tribeId, request.auth.uid))
+        && leaderOk(get(memberPath(tribeId, request.auth.uid)).data);
+    }
+    function isOwner(tribeId) {
+      return verified() && exists(memberPath(tribeId, request.auth.uid))
+        && ownerOk(get(memberPath(tribeId, request.auth.uid)).data);
+    }
+
+    // The membership-change marker: {uid, kind, at}. It must be re-written (at == request.time)
+    // by every write that changes membership, so a stale marker can never authorise a new change.
+    function mcShape(m) {
+      return m is map
+        && m.keys().hasOnly(['uid', 'kind', 'at'])
+        && m.keys().hasAll(['uid', 'kind', 'at'])
+        && m.uid is string
+        && m.at == request.time;
+    }
+    // Marker as it will be AFTER this atomic write (used by member / invite rules).
+    function mcIs(tribeId, kind, uid) {
+      let m = getAfter(tribePath(tribeId)).data.lastMembershipChange;
+      return m.kind == kind && m.uid == uid && m.at == request.time;
+    }
+    // memberCount after this atomic write must equal memberCount before it + delta.
+    function countAfterIs(tribeId, delta) {
+      return getAfter(tribePath(tribeId)).data.memberCount == get(tribePath(tribeId)).data.memberCount + delta;
+    }
+
+    // ---- Tribe document: accounting branches (called from `allow update`) ----
+    // A person becomes an active member: +1, below the cap, and that person's member doc is
+    // active after the write but was NOT active before. Who may write: the person (invitation
+    // accepted) or a leader (join request accepted); the member-doc rules verify which.
+    function tribeJoinOk(tribeId) {
+      let m = request.resource.data.lastMembershipChange;
+      return m.kind == 'join'
+        && resource.data.status == 'active'
+        && request.resource.data.memberCount == resource.data.memberCount + 1
+        && (m.uid == request.auth.uid || isLeader(tribeId))
+        && !userIsTribeMember(tribeId, m.uid)
+        && existsAfter(memberPath(tribeId, m.uid))
+        && getAfter(memberPath(tribeId, m.uid)).data.status == 'active'
+        && resource.data.memberCount < platformCap();
+    }
+    // A leader removes somebody else: -1, target was active and is 'removed' after the write.
+    function tribeRemoveOk(tribeId) {
+      let m = request.resource.data.lastMembershipChange;
+      return m.kind == 'remove'
+        && m.uid != request.auth.uid
+        && request.resource.data.memberCount == resource.data.memberCount - 1
+        && request.resource.data.memberCount >= 1
+        && isLeader(tribeId)
+        && userIsTribeMember(tribeId, m.uid)
+        && existsAfter(memberPath(tribeId, m.uid))
+        && getAfter(memberPath(tribeId, m.uid)).data.status == 'removed';
+    }
+    // A member leaves: -1, the caller was active and is 'left' after the write.
+    function tribeLeaveOk(tribeId) {
+      let m = request.resource.data.lastMembershipChange;
+      return m.kind == 'leave'
+        && m.uid == request.auth.uid
+        && request.resource.data.memberCount == resource.data.memberCount - 1
+        && request.resource.data.memberCount >= 1
+        && userIsTribeMember(tribeId, m.uid)
+        && getAfter(memberPath(tribeId, m.uid)).data.status == 'left';
+    }
+    // Ownership transfer: memberCount unchanged; new owner promoted, old owner demoted, same write.
+    function tribeTransferOk(tribeId) {
+      let m = request.resource.data.lastMembershipChange;
+      return m.kind == 'transfer'
+        && m.uid != request.auth.uid
+        && request.resource.data.memberCount == resource.data.memberCount
+        && isOwner(tribeId)
+        && userIsTribeMember(tribeId, m.uid)
+        && getAfter(memberPath(tribeId, m.uid)).data.role == 'owner'
+        && getAfter(memberPath(tribeId, request.auth.uid)).data.role == 'moderator';
+    }
+    // The only member (the owner) leaves: the Tribe is archived and the count becomes 0.
+    function tribeLastOwnerLeaveOk(tribeId) {
+      let m = request.resource.data.lastMembershipChange;
+      return m.kind == 'leave'
+        && m.uid == request.auth.uid
+        && resource.data.status == 'active'
+        && resource.data.memberCount == 1
+        && request.resource.data.status == 'archived'
+        && request.resource.data.memberCount == 0
+        && isOwner(tribeId)
+        && getAfter(memberPath(tribeId, m.uid)).data.status == 'left';
+    }
+
     function validTribe(d) {
       return str(d.name, 3, 40) && d.nameLower == d.name.lower()
         && str(d.description, 10, 500)
@@ -179,66 +356,175 @@ allow update: if verified()
     }
 
     match /tribes/{tribeId} {
-      allow get: if verified() && (resource.data.privacy == 'public' || tribeMember(tribeId) || isAdmin());
+      // Readable by: anyone if public, members, admins, and a student holding a PENDING invitation
+      // (so an invitee of a private Tribe can see what they are joining and its current size).
+      allow get: if verified() && (resource.data.privacy == 'public' || tribeMember(tribeId) || isAdmin()
+        || (exists(invitePath(tribeId, request.auth.uid))
+            && get(invitePath(tribeId, request.auth.uid)).data.status == 'pending'));
       // Discovery queries MUST filter privacy == 'public' (admins may list all).
       allow list: if verified() && (resource.data.privacy == 'public' || isAdmin());
-      
-allow create: if verified()
-  && request.resource.data.keys().hasAll([
-    'name', 'nameLower', 'description', 'goal', 'category',
-    'skills', 'interests', 'privacy', 'idealMemberCount',
-    'projectFocus', 'creatorUid', 'memberCount', 'status',
-    'createdAt', 'updatedAt', 'lastActivityAt'
-  ])
-  && request.resource.data.keys().hasOnly([
-    'name', 'nameLower', 'description', 'goal', 'category',
-    'skills', 'interests', 'privacy', 'idealMemberCount',
-    'projectFocus', 'creatorUid', 'memberCount', 'status',
-    'createdAt', 'updatedAt', 'lastActivityAt'
-  ])
-  && validTribe(request.resource.data)
-  && request.resource.data.creatorUid == request.auth.uid
-  && request.resource.data.memberCount == 1
-  && request.resource.data.status == 'active'
-  && request.resource.data.createdAt == request.time
-  && request.resource.data.updatedAt == request.time
-  && request.resource.data.lastActivityAt == request.time
-  && !exists(memberPath(tribeId, request.auth.uid))
-  && getAfter(memberPath(tribeId, request.auth.uid)).data.uid == request.auth.uid
-  && getAfter(memberPath(tribeId, request.auth.uid)).data.role == 'owner'
-  && getAfter(memberPath(tribeId, request.auth.uid)).data.status == 'active';
 
-      allow update: if verified() && tribeLeader(tribeId)
+      // Create: the creator becomes the owner in the SAME atomic write.
+      allow create: if verified()
+        && request.resource.data.keys().hasAll([
+          'name', 'nameLower', 'description', 'goal', 'category',
+          'skills', 'interests', 'privacy', 'idealMemberCount',
+          'projectFocus', 'creatorUid', 'memberCount', 'status',
+          'createdAt', 'updatedAt', 'lastActivityAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'name', 'nameLower', 'description', 'goal', 'category',
+          'skills', 'interests', 'privacy', 'idealMemberCount',
+          'projectFocus', 'creatorUid', 'memberCount', 'status',
+          'createdAt', 'updatedAt', 'lastActivityAt'
+        ])
+        && validTribe(request.resource.data)
+        && request.resource.data.creatorUid == request.auth.uid
+        && request.resource.data.memberCount == 1
+        && request.resource.data.status == 'active'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastActivityAt == request.time
+        && !exists(memberPath(tribeId, request.auth.uid))
+        && getAfter(memberPath(tribeId, request.auth.uid)).data.uid == request.auth.uid
+        && getAfter(memberPath(tribeId, request.auth.uid)).data.role == 'owner'
+        && getAfter(memberPath(tribeId, request.auth.uid)).data.status == 'active';
+
+      // (U1) Leaders edit the Tribe's public details. memberCount / status are NOT editable here.
+      allow update: if verified()
         && resource.data.status == 'active'
-        && onlyKeys(['name','nameLower','description','goal','category','skills','interests',
-                     'privacy','idealMemberCount','projectFocus','updatedAt'])
-        && validTribe(request.resource.data);
-      allow delete: if false;
+        && onlyKeys([
+          'name', 'nameLower', 'description', 'goal', 'category',
+          'skills', 'interests', 'privacy', 'idealMemberCount',
+          'projectFocus', 'updatedAt'
+        ])
+        && request.resource.data.updatedAt == request.time
+        && validTribe(request.resource.data)
+        && tribeLeader(tribeId);
 
+      // (U2) The owner archives an active Tribe.
+      allow update: if verified()
+        && resource.data.status == 'active'
+        && request.resource.data.status == 'archived'
+        && onlyKeys(['status', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && isOwner(tribeId);
+
+      // (U3) Membership accounting: join / remove / leave / ownership transfer.
+      // memberCount may only move by exactly +/-1, with its member-document change, in one write.
+      allow update: if verified()
+        && onlyKeys(['memberCount', 'lastMembershipChange', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && mcShape(request.resource.data.lastMembershipChange)
+        && (tribeJoinOk(tribeId)
+            || tribeRemoveOk(tribeId)
+            || tribeLeaveOk(tribeId)
+            || tribeTransferOk(tribeId));
+
+      // (U4) The last member (owner) leaves, which archives the Tribe.
+      allow update: if verified()
+        && onlyKeys(['status', 'memberCount', 'lastMembershipChange', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && mcShape(request.resource.data.lastMembershipChange)
+        && tribeLastOwnerLeaveOk(tribeId);
+
+      allow delete: if false;
       match /members/{uid} {
+        // Own membership is always readable (also when the document does not exist yet).
         allow read: if verified() && (
-          tribeMember(tribeId) || isAdmin()
+          isSelf(uid) || tribeMember(tribeId) || isAdmin()
           || get(tribePath(tribeId)).data.privacy == 'public');
+
         // A member may only bump their own lastReadAt.
         allow update: if verified() && isSelf(uid) && resource.data.status == 'active'
           && onlyKeys(['lastReadAt']);
-        
-allow create: if verified()
-  && isSelf(uid)
-  && !exists(tribePath(tribeId))
-  && request.resource.data.keys().hasOnly([
-    'uid', 'role', 'status', 'joinedAt', 'lastReadAt'
-  ])
-  && request.resource.data.uid == uid
-  && request.resource.data.role == 'owner'
-  && request.resource.data.status == 'active'
-  && request.resource.data.joinedAt == request.time
-  && request.resource.data.lastReadAt == request.time
-  && getAfter(tribePath(tribeId)).data.creatorUid == uid
-  && getAfter(tribePath(tribeId)).data.status == 'active';
 
-allow delete: if false;
+        // (C1) Tribe creation: the creator's owner document, written in the same batch as the Tribe.
+        allow create: if verified()
+          && isSelf(uid)
+          && request.resource.data.keys().hasOnly(['uid', 'role', 'status', 'joinedAt', 'lastReadAt'])
+          && request.resource.data.uid == uid
+          && request.resource.data.role == 'owner'
+          && request.resource.data.status == 'active'
+          && request.resource.data.joinedAt == request.time
+          && request.resource.data.lastReadAt == request.time
+          && !exists(tribePath(tribeId))
+          && getAfter(tribePath(tribeId)).data.creatorUid == uid
+          && getAfter(tribePath(tribeId)).data.status == 'active';
 
+        // (C2) First-time join (leader accepts a request, or invitee accepts an invitation).
+        allow create: if verified()
+          && newMemberOk(uid)
+          && joinAuthorized(tribeId, uid);
+
+        // (R1) Re-join after leaving / being removed: same authorisation, comes back as a plain member.
+        allow update: if verified()
+          && rejoinMemberOk(uid)
+          && joinAuthorized(tribeId, uid);
+
+        // (X1) A leader removes another member. Owner: anyone but an owner. Moderator: members only.
+        allow update: if verified()
+          && uid != request.auth.uid
+          && resource.data.status == 'active'
+          && request.resource.data.status == 'removed'
+          && onlyKeys(['status', 'removedAt'])
+          && request.resource.data.removedAt == request.time
+          && isLeader(tribeId)
+          && (get(memberPath(tribeId, request.auth.uid)).data.role == 'owner'
+                ? resource.data.role != 'owner'
+                : resource.data.role == 'member')
+          && countAfterIs(tribeId, -1)
+          && mcIs(tribeId, 'remove', uid);
+
+        // (X2) A member leaves. An owner may leave only as the last member, which archives the Tribe.
+        allow update: if verified()
+          && isSelf(uid)
+          && resource.data.status == 'active'
+          && request.resource.data.status == 'left'
+          && onlyKeys(['status', 'leftAt'])
+          && request.resource.data.leftAt == request.time
+          && mcIs(tribeId, 'leave', uid)
+          && (resource.data.role != 'owner'
+                ? countAfterIs(tribeId, -1)
+                : (get(tribePath(tribeId)).data.memberCount == 1
+                   && getAfter(tribePath(tribeId)).data.status == 'archived'
+                   && getAfter(tribePath(tribeId)).data.memberCount == 0));
+
+        // (T1) The owner toggles another member between 'member' and 'moderator'. Never to owner.
+        allow update: if verified()
+          && uid != request.auth.uid
+          && resource.data.status == 'active'
+          && resource.data.role in ['member', 'moderator']
+          && onlyKeys(['role'])
+          && request.resource.data.role in ['member', 'moderator']
+          && request.resource.data.role != resource.data.role
+          && exists(memberPath(tribeId, request.auth.uid))
+          && ownerOk(get(memberPath(tribeId, request.auth.uid)).data);
+
+        // (T2) Ownership transfer, part 1: the owner promotes another active member to owner.
+        allow update: if verified()
+          && uid != request.auth.uid
+          && resource.data.status == 'active'
+          && resource.data.role in ['member', 'moderator']
+          && onlyKeys(['role'])
+          && request.resource.data.role == 'owner'
+          && exists(memberPath(tribeId, request.auth.uid))
+          && ownerOk(get(memberPath(tribeId, request.auth.uid)).data)
+          && mcIs(tribeId, 'transfer', uid)
+          && getAfter(memberPath(tribeId, request.auth.uid)).data.role == 'moderator';
+
+        // (T3) Ownership transfer, part 2: the old owner becomes a moderator, only in the same write.
+        allow update: if verified()
+          && isSelf(uid)
+          && resource.data.status == 'active'
+          && resource.data.role == 'owner'
+          && onlyKeys(['role'])
+          && request.resource.data.role == 'moderator'
+          && getAfter(tribePath(tribeId)).data.lastMembershipChange.kind == 'transfer'
+          && getAfter(tribePath(tribeId)).data.lastMembershipChange.at == request.time
+          && getAfter(memberPath(tribeId, getAfter(tribePath(tribeId)).data.lastMembershipChange.uid)).data.role == 'owner';
+
+        allow delete: if false;
       }
 
       match /joinRequests/{uid} {
@@ -252,18 +538,25 @@ allow delete: if false;
           && get(tribePath(tribeId)).data.privacy == 'public'
           && get(tribePath(tribeId)).data.status == 'active'
           && !userIsTribeMember(tribeId, uid);
-        // Requester may cancel a pending request or re-open a closed one.
-        allow update: if verified() && isSelf(uid)
-          && onlyKeys(['status', 'message', 'updatedAt'])
-          && ((resource.data.status == 'pending' && request.resource.data.status == 'cancelled')
-              || (resource.data.status in ['rejected', 'cancelled', 'accepted']
+
+        allow update: if (
+          // Requester cancels, or re-opens a closed request (only while not a member).
+          (verified()
+            && isSelf(uid)
+            && onlyKeys(['status', 'message', 'updatedAt'])
+            && ((resource.data.status == 'pending'
+                  && request.resource.data.status == 'cancelled')
+                || (resource.data.status in ['rejected', 'cancelled', 'accepted']
                   && request.resource.data.status == 'pending'
                   && !userIsTribeMember(tribeId, uid)))
-          && str(request.resource.data.message, 0, 300)
-          && request.resource.data.updatedAt == request.time;
+            && str(request.resource.data.message, 0, 300)
+            && request.resource.data.updatedAt == request.time)
+          // A Tribe leader accepts or rejects a pending request.
+          || leaderRespondsToRequest(tribeId, uid)
+        );
+
         allow delete: if false;
       }
-
       match /messages/{messageId} {
         allow read: if tribeMember(tribeId);
         allow create: if tribeMember(tribeId)
@@ -313,10 +606,61 @@ allow delete: if false;
       allow read: if verified() && resource.data.uid == request.auth.uid;
     }
 
+    // ---------------------------------------------------- Tribe invitations
+    // Document id is `${tribeId}_${inviteeUid}`, so there can be at most ONE invitation per
+    // (Tribe, student); a second pending one is impossible. Only the inviter and the invitee can
+    // read it. The notification for the invitee is created by a trigger, never by a client.
+    function inviteeOk(d) {
+      return d.get('visibility', '') == 'campus' && d.get('accountStatus', 'active') != 'suspended';
+    }
+    function inviteTribeOk(t) {
+      return t.status == 'active' && t.name == request.resource.data.tribeName;
+    }
+    // Shared by create and by re-inviting after an earlier invitation was resolved.
+    function validInviteWrite(inviteId) {
+      let d = request.resource.data;
+      return verified()
+        && d.keys().hasOnly(['tribeId', 'tribeName', 'inviteeUid', 'inviterUid', 'inviterName', 'message', 'status', 'createdAt'])
+        && d.keys().hasAll(['tribeId', 'tribeName', 'inviteeUid', 'inviterUid', 'inviterName', 'message', 'status', 'createdAt'])
+        && inviteId == d.tribeId + '_' + d.inviteeUid
+        && d.inviterUid == request.auth.uid
+        && d.inviteeUid != request.auth.uid
+        && d.status == 'pending'
+        && d.createdAt == request.time
+        && str(d.message, 0, 200)
+        && isLeader(d.tribeId)
+        && inviteTribeOk(get(tribePath(d.tribeId)).data)
+        && !userIsTribeMember(d.tribeId, d.inviteeUid)
+        && exists(userPath(d.inviteeUid))
+        && inviteeOk(get(userPath(d.inviteeUid)).data)
+        && get(userPath(request.auth.uid)).data.name == d.inviterName;
+    }
+
     match /tribeInvites/{inviteId} {
       allow read: if verified() && (resource.data.inviteeUid == request.auth.uid
                                     || resource.data.inviterUid == request.auth.uid);
-      allow write: if false;   // callables only
+
+      // A Tribe leader invites an available student.
+      allow create: if validInviteWrite(inviteId);
+
+      // A leader re-invites after the earlier invitation was answered (never over a pending one).
+      allow update: if validInviteWrite(inviteId)
+        && resource.data.status != 'pending'
+        && resource.data.tribeId == request.resource.data.tribeId
+        && resource.data.inviteeUid == request.resource.data.inviteeUid;
+
+      // The invitee declines, or accepts (accepting must come with the member document in the same write).
+      allow update: if verified()
+        && resource.data.inviteeUid == request.auth.uid
+        && resource.data.status == 'pending'
+        && onlyKeys(['status', 'respondedAt'])
+        && request.resource.data.respondedAt == request.time
+        && (request.resource.data.status == 'declined'
+            || (request.resource.data.status == 'accepted'
+                && existsAfter(memberPath(resource.data.tribeId, request.auth.uid))
+                && getAfter(memberPath(resource.data.tribeId, request.auth.uid)).data.status == 'active'));
+
+      allow delete: if false;
     }
 
     // ------------------------------------------------------ voice rooms

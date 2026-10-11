@@ -3,7 +3,7 @@ import { h, clear } from '../../core/dom.js';
 import { icon } from '../../core/icons.js';
 import { toast, busy, chip, input, field, textarea, select, confirmDialog, skeletonGrid, errorState, tabs, openModal, counter } from '../../core/ui.js';
 import { dataTable, askText, fmt } from './_ui.js';
-import { F, db, callFn, friendlyError } from '../../core/firebase.js';
+import { F, db, friendlyError } from '../../core/firebase.js';
 import { col, withId, getOne } from '../../services/_util.js';
 import { skillPicker } from '../../components/skillPicker.js';
 import { EVENT_CATEGORIES, RESOURCE_TYPES, SKILL_GROUPS } from '../../lib/taxonomy.js';

@@ -5,7 +5,7 @@
   "description": "ANURAG TRIBE - student collaboration, discovery and Tribe platform",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/unit/*.test.js",
+    "test": "node --import ./tests/unit/helpers/register.mjs --test tests/unit/*.test.js",
     "check": "node scripts/static-check.mjs",
     "test:rules": "firebase emulators:exec --only firestore \"node --test tests/rules/*.test.js\"",
     "serve": "firebase emulators:start",

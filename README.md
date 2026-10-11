@@ -38,9 +38,8 @@ cd functions && npm install && cd ..
 
 ### Functions configuration
 ```bash
-cp functions/.env.example functions/.env      # APP_URL, SUPER_ADMIN_EMAILS, EMAIL_FROM, TURN_URLS
+cp functions/.env.example functions/.env      # APP_URL, SUPER_ADMIN_UID, EMAIL_FROM
 firebase functions:secrets:set RESEND_API_KEY        # or enter:  unset   (emails are then logged as not_configured)
-firebase functions:secrets:set TURN_SHARED_SECRET    # or enter:  unset   (STUN only)
 ```
 
 ### Deploy
@@ -49,7 +48,7 @@ firebase deploy --only firestore        # rules + indexes (indexes take a few mi
 firebase deploy --only functions
 firebase deploy --only hosting
 ```
-Open the site, **register with the email listed in `SUPER_ADMIN_EMAILS`**, verify it, sign in once → that account becomes **Super Admin** (claim set by `syncMyClaims`). Sign out/in if the admin link doesn't appear.
+The **Super Admin** is the single UID set in `isSuper()` (`firestore.rules`), `SUPER_ADMIN_UID` (`public/js/core/roles.js`) and `SUPER_ADMIN_UID` (`functions/.env`); keep the three identical. Register that account, verify its email and sign in.
 
 ### Run locally with emulators
 ```bash
@@ -75,8 +74,8 @@ The web SDK talks to production unless you add `connectAuthEmulator`/`connectFir
 ```
 Student → Skills → People → TRIBE → Chat/Voice → Project → Showcase → Recognition
 ```
-* **Create / manage:** `createTribe` callable (validates, enforces `maxTribesPerUser`, unique name). Owner → moderators → members. Ownership transfer, remove, leave, archive are all callables (`functions/src/tribes.js`) so `members` is **client read-only** and `memberCount` can't be forged.
-* **Join:** student writes `tribes/{id}/joinRequests/{uid}` (rules: self only, public+active Tribe) → leaders get a notification → `respondToJoinRequest` adds the member atomically. **Invitations:** `inviteToTribe` / `respondToInvite`.
+* **Create / manage (no Cloud Functions):** every membership change is a direct Firestore transaction/batch from `public/js/services/tribes.js`, validated by `firestore.rules`: create Tribe, join (leader accepts a request, or invitee accepts an invitation), remove, leave, roles, ownership transfer, archive. `memberCount` can only move by exactly ±1 together with the matching member document, and `tribes/{id}.lastMembershipChange` (`{uid, kind, at}`) names who changed, which is how the rules cross-check the two writes. Not enforced any more (cannot be done by rules without extra documents): unique Tribe names and the per-user `maxTribesPerUser` cap.
+* **Join:** student writes `tribes/{id}/joinRequests/{uid}` (rules: self only, public+active Tribe) → leaders get a notification (trigger) → a leader accepts in one atomic write. **Invitations:** `tribeInvites/{tribeId}_{inviteeUid}` (one per student per Tribe; leader creates, invitee answers). Notifications for all of these are sent by Firestore triggers, never by clients.
 * **Ideal size ≠ limit.** `idealMemberCount` (default 6) is only displayed as `4/6 MEMBERS`; overflow shows as extra dots. The only hard ceiling is the admin-configurable `tribeHardCap` (default 30).
 * **Recommendations** (`lib/recommend.js`) are deterministic and explainable (“Your skills fit: Video Editing”, “You want to learn: AI / ML”), scored from skills, interests, learning goals, looking-for, with capacity only as a tie-breaker.
 * **Chat** = text + links only (`tribes/{id}/messages`). Links get provider labels (YouTube/GitHub/Figma/…); nothing is fetched or embedded. Replies, edit, delete, leader-hide, report, unread dots, presence dots. **No media upload exists.**
@@ -97,8 +96,8 @@ SENDER → recipient accepts → WebRTC DataChannel → recipient saves locally
 `users` (+`usernames` reservation, `userPrivate` prefs) · `tribes/{id}` → `members`, `joinRequests`, `messages`, `presence` · `tribeInvites` · `tribeVoiceRooms/{id}` → `participants`, `signaling` · `transferSessions/{id}` → `signaling` · `helpRequests/{id}` → `messages` · `projects` (+`likes`) · `applications` · `posts` (+`likes`) · `comments` · `showcase` · `events` → `registrations` · `resources` · `announcements` · `notifications` · `reports` · `settings/{platform,taxonomy}` · backend-only: `emailLogs`, `adminLog`.
 
 ### Roles, admin and the privacy boundary
-* Roles are **Firebase custom claims** (`user | admin | superAdmin`, `suspended`) written only by Cloud Functions (`setUserRole`, `setUserSuspended`, `syncMyClaims`). Rules read `request.auth.token`, never a user-editable field. Nobody can promote themselves.
-* **Super Admin** (from `SUPER_ADMIN_EMAILS`): manage admins, platform settings, everything an admin can. **Admin:** moderate users (suspend), Tribes (suspend/reinstate), projects, posts, showcase review, announcements, events, resources, skills/categories, reports. Console: `admin.html#…`.
+* **Admin** is `users/{uid}.role == 'admin'`, editable only by the **Super Admin** (a fixed UID) through `firestore.rules`; nobody can promote themselves. **Suspension** is a Firebase Auth custom claim (`suspended`) plus a disabled account, written only by the `setUserSuspended` Cloud Function, and rules read it from `request.auth.token`.
+* **Super Admin** (fixed UID): manage admins, platform settings, everything an admin can. **Admin:** moderate users (suspend), Tribes (suspend/reinstate), projects, posts, showcase review, announcements, events, resources, skills/categories, reports. Console: `admin.html#…`.
 * **Admins cannot read private Tribe chat or help-request conversations.** A reported message carries a snapshot that **rules verify against the real message**, so reviewers see exactly what was reported and nothing else.
 
 ### Email notifications
@@ -142,7 +141,7 @@ anurag-tribe/
 ## 6. Security checklist before launch
 - [ ] `npm run test:rules` is green on your machine
 - [ ] Deployed indexes show **Enabled** (Firestore → Indexes)
-- [ ] `SUPER_ADMIN_EMAILS` contains only people you trust
+- [ ] `SUPER_ADMIN_UID` (rules, `roles.js`, `functions/.env`) is your own account
 - [ ] Email domain verified in Resend; test a help request end-to-end
 - [ ] Two real phones on different networks: file transfer and voice (add TURN if any fail)
 - [ ] App Check enabled (recommended)

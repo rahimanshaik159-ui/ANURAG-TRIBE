@@ -11,11 +11,10 @@ const Timestamp = admin.firestore.Timestamp;
 
 const REGION = 'asia-south1'; // must match APP.functionsRegion in public/js/config/app-config.js
 const APP_URL = defineString('APP_URL', { default: 'http://localhost:5000' });
-const SUPER_ADMIN_EMAILS = defineString('SUPER_ADMIN_EMAILS', { default: '' });
+// Must equal the UID hard-coded in isSuper() in firestore.rules and SUPER_ADMIN_UID in public/js/core/roles.js.
+const SUPER_ADMIN_UID = defineString('SUPER_ADMIN_UID', { default: 'o5fX7pb3qbRTpA2GGE9SeBVL2up2' });
 const EMAIL_FROM = defineString('EMAIL_FROM', { default: 'ANURAG TRIBE <no-reply@example.com>' });
-const TURN_URLS = defineString('TURN_URLS', { default: '' });
 const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
-const TURN_SHARED_SECRET = defineSecret('TURN_SHARED_SECRET');
 
 const DEFAULT_SETTINGS = {
   maxTribesPerUser: 3,       // active Tribes a student may OWN
@@ -43,16 +42,27 @@ function requireVerified(req) {
   if (a.token.suspended === true) throw new HttpsError('permission-denied', 'Account suspended.');
   return a.uid;
 }
-const roleOf = (req) => (req.auth && req.auth.token.role) || 'user';
-function requireAdmin(req) {
-  const uid = requireVerified(req);
-  if (!['admin', 'superAdmin'].includes(roleOf(req))) throw new HttpsError('permission-denied', 'Admins only.');
-  return uid;
+/**
+ * Roles live in Firestore (users/{uid}.role, written by the Super Admin through firestore.rules) plus the
+ * single Super Admin UID - exactly what firestore.rules isAdmin()/isSuper() use. Custom-claim roles are
+ * deliberately NOT trusted: demoting an admin only edits the Firestore document, so a stale claim would
+ * otherwise keep granting server-side power.
+ */
+function roleFromUser(uid, superUid, userData) {
+  if (uid && uid === superUid) return 'superAdmin';
+  return userData && userData.role === 'admin' ? 'admin' : 'user';
 }
-function requireSuper(req) {
+async function roleOfUid(uid) {
+  if (uid === SUPER_ADMIN_UID.value()) return 'superAdmin';
+  const s = await db.doc(`users/${uid}`).get();
+  return roleFromUser(uid, SUPER_ADMIN_UID.value(), s.exists ? s.data() : null);
+}
+/** Verified, not suspended, and an admin/super admin. Returns { uid, role }. */
+async function requireAdmin(req) {
   const uid = requireVerified(req);
-  if (roleOf(req) !== 'superAdmin') throw new HttpsError('permission-denied', 'Super admin only.');
-  return uid;
+  const role = await roleOfUid(uid);
+  if (role === 'user') throw new HttpsError('permission-denied', 'Admins only.');
+  return { uid, role };
 }
 
 /** Create one notification doc (clients can never create these). */
@@ -68,7 +78,7 @@ async function notify(uid, type, title, body, link, meta) {
 const clip = (s, n) => String(s == null ? '' : s).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n);
 
 module.exports = {
-  admin, db, FieldValue, Timestamp, HttpsError, REGION, APP_URL, SUPER_ADMIN_EMAILS, EMAIL_FROM,
-  TURN_URLS, RESEND_API_KEY, TURN_SHARED_SECRET, getSettings, requireVerified, requireAdmin, requireSuper,
-  roleOf, notifRef, notifData, notify, clip, DEFAULT_SETTINGS,
+  admin, db, FieldValue, Timestamp, HttpsError, REGION, APP_URL, SUPER_ADMIN_UID, EMAIL_FROM,
+  RESEND_API_KEY, getSettings, requireVerified, requireAdmin, roleFromUser, roleOfUid,
+  notifRef, notifData, notify, clip, DEFAULT_SETTINGS,
 };

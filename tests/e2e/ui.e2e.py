@@ -12,9 +12,9 @@ FAKE = open(os.path.join(HERE, 'fake-firebase.js')).read()
 def mod(names, ns): return '\n'.join(f"export const {n} = (...a) => window.__FB.mods.{ns}.{n}(...a);" if n[0].islower() and n not in ('browserLocalPersistence','Timestamp','ReCaptchaV3Provider') else f"export const {n} = window.__FB.mods.{ns}.{n};" for n in names)
 MODS = {
  'firebase-app.js': mod(['initializeApp'], 'app'),
- 'firebase-auth.js': mod('getAuth onAuthStateChanged createUserWithEmailAndPassword signInWithEmailAndPassword signOut sendEmailVerification sendPasswordResetEmail updateProfile setPersistence browserLocalPersistence'.split(), 'auth'),
- 'firebase-firestore.js': mod('getFirestore collection collectionGroup doc getDoc getDocs setDoc addDoc updateDoc deleteDoc query where orderBy limit startAfter onSnapshot serverTimestamp writeBatch arrayUnion arrayRemove increment Timestamp getCountFromServer runTransaction'.split(), 'fs'),
- 'firebase-functions.js': mod(['getFunctions', 'httpsCallable'], 'fns'),
+ 'firebase-auth.js': mod('getAuth onAuthStateChanged createUserWithEmailAndPassword signInWithEmailAndPassword signOut sendEmailVerification sendPasswordResetEmail updateProfile setPersistence browserLocalPersistence connectAuthEmulator'.split(), 'auth'),
+ 'firebase-firestore.js': mod('getFirestore collection collectionGroup doc getDoc getDocs setDoc addDoc updateDoc deleteDoc query where orderBy limit startAfter onSnapshot serverTimestamp writeBatch arrayUnion arrayRemove increment Timestamp getCountFromServer runTransaction connectFirestoreEmulator'.split(), 'fs'),
+ 'firebase-functions.js': mod(['getFunctions', 'httpsCallable', 'connectFunctionsEmulator'], 'fns'),
  'firebase-app-check.js': mod(['initializeAppCheck', 'ReCaptchaV3Provider'], 'check'),
 }
 CONFIG = "export const firebaseConfig = { apiKey: 'test-key', authDomain: 't.firebaseapp.com', projectId: 'test-project', appId: 't', messagingSenderId: '1' };"

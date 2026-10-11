@@ -1,6 +1,6 @@
 // Firestore security-rules tests. REQUIRE the Firebase emulator:  npm run test:rules
-// (WRITTEN BUT NOT EXECUTED in the authoring sandbox, which could not download the emulator.
-//  Treat a first green run on your machine as part of setup.)
+// (These rules tests need the Firestore emulator, which the authoring sandbox could not download, so a first
+//  green run on your machine is a required step before deploying firestore.rules.)
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -42,7 +42,7 @@ test('hidden profiles are not readable by others; directory query must filter vi
   const db = verified('u9'); await assertFails(getDoc(doc(db, 'users', 'h1'))); await assertSucceeds(getDoc(doc(db, 'users', 'c1')));
   await assertSucceeds(getDocs(query(collection(db, 'users'), where('visibility', '==', 'campus')))); await assertFails(getDocs(collection(db, 'users')));
 });
-test('tribes cannot be created by clients (callable only); members subcollection is client read-only', async () => {
+test('a Tribe cannot be created without its owner member document, and members cannot be forged', async () => {
   const db = verified('u1'); await assertFails(setDoc(doc(db, 'tribes', 'x'), { name: 'Hacked', nameLower: 'hacked', description: 'long enough text', category: 'tech', skills: [], interests: [], creatorUid: 'u1', privacy: 'public', idealMemberCount: 6, memberCount: 1, status: 'active' }));
   await seed((s) => addTribe(s)); await assertFails(setDoc(doc(db, 'tribes', 't1', 'members', 'u1'), { uid: 'u1', role: 'owner', status: 'active' }));
 });
@@ -68,7 +68,7 @@ test('reporting a Tribe message requires a snapshot that matches the real messag
   const m = verified('m1'); const rep = (text) => ({ reporterUid: 'm1', targetType: 'tribeMessage', targetId: 'x', tribeId: 't1', snapshot: { text, senderUid: 'm2' }, reason: 'harassment', details: '', status: 'open', createdAt: serverTimestamp() });
   await assertFails(addDoc(collection(m, 'reports'), rep('forged text'))); await assertSucceeds(addDoc(collection(m, 'reports'), rep('bad words')));
 });
-test('join requests: self only, public active Tribe only; leaders (not members) can read; accept is callable-only', async () => {
+test('join requests: self only, public active Tribe only; leaders (not members) can read; a requester cannot accept their own request', async () => {
   await seed(async (s) => { await addTribe(s); await addMember(s, 't1', 'owner', 'owner'); await addMember(s, 't1', 'mem'); });
   const u = verified('u1'); const req = { requestId: 'u1', uid: 'u1', message: 'hi', status: 'pending', createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
   await assertSucceeds(setDoc(doc(u, 'tribes', 't1', 'joinRequests', 'u1'), req)); await assertFails(setDoc(doc(verified('u2'), 'tribes', 't1', 'joinRequests', 'u1'), req));

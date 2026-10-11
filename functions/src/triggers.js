@@ -79,13 +79,46 @@ exports.onTransferUpdated = onDocumentUpdated({ ...opts, document: 'transferSess
 // ---- Tribes -----------------------------------------------------------------
 exports.onJoinRequestWritten = onDocumentWritten({ ...opts, document: 'tribes/{tid}/joinRequests/{uid}' }, async (e) => {
   const after = e.data.after.exists ? e.data.after.data() : null;
-  if (!after || after.status !== 'pending') return;
   const before = e.data.before.exists ? e.data.before.data() : null;
-  if (before && before.status === 'pending') return;
+  if (!after) return;
   const t = await db.doc(`tribes/${e.params.tid}`).get();
   if (!t.exists) return;
+  // Leader decided on a pending request -> tell the student (this used to be sent by respondToJoinRequest).
+  if (before && before.status === 'pending' && ['accepted', 'rejected'].includes(after.status)) {
+    const accepted = after.status === 'accepted';
+    await C.notify(e.params.uid, 'tribe_join_decision', accepted ? `You joined ${t.data().name}` : `Request to join ${t.data().name} was declined`,
+      accepted ? 'Welcome! Say hello in the Tribe chat.' : 'You can look for other Tribes that match your skills.', accepted ? `tribe.html?id=${e.params.tid}` : 'tribes.html');
+    return;
+  }
+  // New (or re-opened) pending request -> tell the leaders.
+  if (after.status !== 'pending' || (before && before.status === 'pending')) return;
   const leaders = await tribeMemberUids(e.params.tid, { leadersOnly: true });
   await fanOut(leaders, 'tribe_join_request', `${await userName(e.params.uid)} wants to join ${t.data().name}`, C.clip(after.message, 120) || 'Review the request in the Tribe members tab.', `tribe.html?id=${e.params.tid}#members`);
+});
+// Invitations are written by Tribe leaders / invitees directly (see firestore.rules); notifications come from here,
+// so a client can never forge one. (Previously sent inside inviteToTribe / respondToInvite.)
+exports.onTribeInviteWritten = onDocumentWritten({ ...opts, document: 'tribeInvites/{id}' }, async (e) => {
+  const after = e.data.after.exists ? e.data.after.data() : null;
+  const before = e.data.before.exists ? e.data.before.data() : null;
+  if (!after) return;
+  if (after.status === 'pending' && !(before && before.status === 'pending')) {
+    await C.notify(after.inviteeUid, 'tribe_invite', `${after.inviterName} invited you to ${after.tribeName}`,
+      C.clip(after.message, 120) || 'Open the invitation to accept or decline.', 'my-tribes.html#invites');
+  } else if (after.status === 'accepted' && before && before.status === 'pending') {
+    await C.notify(after.inviterUid, 'tribe_join_decision', 'Invitation accepted', `A student joined ${after.tribeName}.`, `tribe.html?id=${after.tribeId}`);
+  }
+});
+// Removal and role changes (previously sent inside removeTribeMember / setTribeMemberRole).
+exports.onTribeMemberWritten = onDocumentWritten({ ...opts, document: 'tribes/{tid}/members/{uid}' }, async (e) => {
+  if (!e.data.before.exists || !e.data.after.exists) return;
+  const a = e.data.before.data(); const b = e.data.after.data();
+  const removed = a.status === 'active' && b.status === 'removed';
+  const roleChanged = b.status === 'active' && a.status === 'active' && a.role !== b.role && a.role !== 'owner'; // demoted old owner is not notified
+  if (!removed && !roleChanged) return;
+  const t = await db.doc(`tribes/${e.params.tid}`).get();
+  const tname = t.exists ? t.data().name : 'your Tribe';
+  if (removed) await C.notify(e.params.uid, 'tribe_removed', `Removed from ${tname}`, 'A Tribe leader removed you from the Tribe.', 'tribes.html');
+  else await C.notify(e.params.uid, 'tribe_role', b.role === 'owner' ? `You now own ${tname}` : `Your role in ${tname}: ${b.role}`, '', `tribe.html?id=${e.params.tid}`);
 });
 exports.onTribeMessage = onDocumentCreated({ ...opts, document: 'tribes/{tid}/messages/{mid}' }, async (e) => {
   const m = e.data.data();

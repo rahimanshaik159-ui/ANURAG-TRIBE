@@ -67,18 +67,18 @@
   window.__FB.mods = {
     app: { initializeApp: () => ({}) },
     auth: {
-      getAuth: () => ({ get currentUser() { return window.__FB.user(); } }), setPersistence: async () => {}, browserLocalPersistence: {},
+      getAuth: () => ({ get currentUser() { return window.__FB.user(); } }), connectAuthEmulator: () => {}, setPersistence: async () => {}, browserLocalPersistence: {},
       onAuthStateChanged: (_a, cb) => { setTimeout(() => cb(window.__FB.user()), 5); return () => {}; },
       signOut: async () => { window.__FB.auth.mode = 'none'; }, signInWithEmailAndPassword: async () => ({ user: window.__FB.user() }), createUserWithEmailAndPassword: async () => { throw new Error('stub'); },
       sendEmailVerification: async () => {}, sendPasswordResetEmail: async () => {}, updateProfile: async () => {},
     },
     fs: {
-      getFirestore: () => ({}), collection: (_d, ...p) => mkCol(seg(p).join('/')), collectionGroup: (_d, id) => ({ path: id, __col: true, __group: true }), doc: (_d, ...p) => mkDoc(seg(p).join('/')),
+      getFirestore: () => ({}), connectFirestoreEmulator: () => {}, collection: (_d, ...p) => mkCol(seg(p).join('/')), collectionGroup: (_d, id) => ({ path: id, __col: true, __group: true }), doc: (_d, ...p) => mkDoc(seg(p).join('/')),
       query: (src, ...cons) => ({ __q: true, src, cons }), where: (f, op, v) => ({ t: 'where', f, op, v }), orderBy: (f, dir = 'asc') => ({ t: 'orderBy', f, dir }), limit: (n) => ({ t: 'limit', n }), startAfter: (snap) => ({ t: 'startAfter', snap }),
       serverTimestamp: () => SERVER, increment: (n) => ({ __inc: n }), arrayUnion: (...v) => ({ __union: v }), arrayRemove: (...v) => ({ __remove: v }), Timestamp, ...FB,
     },
     fns: {
-      getFunctions: () => ({}), httpsCallable: (_f, name) => async (data) => { const h = window.__FB.fn[name]; if (h) return { data: await h(data) };
+      getFunctions: () => ({}), connectFunctionsEmulator: () => {}, httpsCallable: (_f, name) => async (data) => { const h = window.__FB.fn[name]; if (h) return { data: await h(data) };
         if (name === 'syncMyClaims') return { data: { role: window.__FB.auth.role, needsTokenRefresh: false } }; if (name === 'getIceServers') return { data: { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }], turn: false, ttl: 3600 } };
         throw Object.assign(new Error(`stub: ${name} not implemented`), { code: 'functions/unimplemented' }); },
     },
