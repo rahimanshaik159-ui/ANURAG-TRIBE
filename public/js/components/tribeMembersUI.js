@@ -34,12 +34,85 @@ export function mountMembers({ tribe, me, myRole, members, container, tax, onCha
       const reqs = await pendingJoinRequests(tribe.id).catch(() => []); const ru = await Promise.all(reqs.map((r) => getUser(r.uid)));
       parts.push(h('div', { class: 'card', id: 'requests' }, h('h3', {}, `Join requests (${reqs.length})`), reqs.length ? reqs.map((r, i) => h('div', { class: 'member-row' }, h('a', { href: `profile.html?id=${r.uid}` }, avatarEl(ru[i], 'md')), h('div', { class: 'grow' }, h('strong', {}, ru[i].name), h('span', { class: 'muted small' }, `${timeAgo(r.createdAt)}${r.message ? ` \u2022 "${r.message}"` : ''}`)),
         h('button', { class: 'btn btn-primary btn-sm', onclick: act(() => respondToJoinRequest(tribe.id, r.uid, true), `${ru[i].name} joined`) }, 'Accept'), h('button', { class: 'btn btn-outline btn-sm', onclick: act(() => respondToJoinRequest(tribe.id, r.uid, false), 'Request declined') }, 'Decline'))) : h('p', { class: 'muted' }, 'No pending requests.')));
-      const q = input({ type: 'search', placeholder: 'Search students by name, username or skill (e.g. "video editors")', 'aria-label': 'Search students to invite' }); const res = h('div', {});
+      
+      const q = input({
+        type: 'search',
+        placeholder: 'Search students by name, username or skill (e.g. "video editors")',
+        'aria-label': 'Search students to invite'
+      });
+      const res = h('div', {});
+
       q.addEventListener('input', debounce(async () => {
-        clear(res); if (q.value.trim().length < 2) return;
-        try { const r = await searchStudents({ text: q.value, size: 8 }, tax); const have = new Set(members.map((m) => m.uid));
-          res.append(r.items.filter((u) => !have.has(u.uid || u.id)).length ? r.items.filter((u) => !have.has(u.uid || u.id)).map((u) => h('div', { class: 'member-row' }, avatarEl(u, 'md'), h('div', { class: 'grow' }, h('strong', {}, u.name), h('span', { class: 'muted small' }, (u.skills || []).slice(0, 3).map((s) => tax.label(s)).join(', '))), h('button', { class: 'btn btn-outline btn-sm', onclick: async (e) => { await busy(e.currentTarget, async () => { await inviteToTribe(tribe.id, u.uid || u.id); toast(`Invited ${u.name}.`, 'success'); e.target.disabled = true; e.target.textContent = 'Invited'; }); } }, 'Invite'))) : h('p', { class: 'muted small' }, 'No students found.')); } catch (e) { res.append(h('p', { class: 'muted small' }, friendlyError(e))); }
+        clear(res);
+
+        const text = q.value.trim();
+        if (text.length < 2) return;
+
+        const searchText = text;
+
+        try {
+          const result = await searchStudents({ text: searchText, size: 8 }, tax);
+
+          // Ignore stale results if the user has typed a newer query.
+          if (q.value.trim() !== searchText) return;
+
+          const existingMembers = new Set(members.map((m) => m.uid));
+          const students = (result.items || []).filter(
+            (u) => !existingMembers.has(u.uid || u.id)
+          );
+
+          console.log('[Invite search] Query:', searchText);
+          console.log('[Invite search] Returned:', result.items?.length ?? 0);
+          console.log('[Invite search] Inviteable:', students.length);
+
+          if (!students.length) {
+            res.append(h('p', {
+              class: 'muted small'
+            }, 'No eligible students found. Try another name or username.'));
+            return;
+          }
+
+          for (const u of students) {
+            const uid = u.uid || u.id;
+            const skills = (u.skills || [])
+              .slice(0, 3)
+              .map((s) => tax.label(s))
+              .join(', ');
+
+            const row = h(
+              'div',
+              { class: 'member-row' },
+              avatarEl(u, 'md'),
+              h(
+                'div',
+                { class: 'grow' },
+                h('strong', {}, u.name || u.username || 'Student'),
+                h('span', { class: 'muted small' }, skills)
+              ),
+              h('button', {
+                class: 'btn btn-outline btn-sm',
+                onclick: async (e) => {
+                  await busy(e.currentTarget, async () => {
+                    await inviteToTribe(tribe.id, uid);
+                    toast(`Invited ${u.name || u.username || 'student'}.`, 'success');
+                    e.currentTarget.disabled = true;
+                    e.currentTarget.textContent = 'Invited';
+                  });
+                }
+              }, 'Invite')
+            );
+
+            res.append(row);
+          }
+        } catch (e) {
+          if (q.value.trim() !== searchText) return;
+          console.error('[Invite search] Failed:', e);
+          res.append(h('p', {
+            class: 'muted small'
+          }, friendlyError(e)));
+        }
       }, 450));
+
       parts.push(h('div', { class: 'card' }, h('h3', {}, 'Invite students'), h('p', { class: 'muted small' }, 'Invited students get a notification and decide for themselves.'), q, res));
     }
     parts.push(h('div', { class: 'card' }, h('h3', {}, 'Leave this Tribe'),
