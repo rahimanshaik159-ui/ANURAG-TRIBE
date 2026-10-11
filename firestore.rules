@@ -637,9 +637,12 @@ allow update: if verified()
     }
 
     match /tribeInvites/{inviteId} {
-      allow read: if verified() && (resource.data.inviteeUid == request.auth.uid
-                                    || resource.data.inviterUid == request.auth.uid);
-
+      allow read: if verified()
+  && (
+    !exists(/databases/$(database)/documents/tribeInvites/$(inviteId))
+    || resource.data.inviteeUid == request.auth.uid
+    || resource.data.inviterUid == request.auth.uid
+  );
       // A Tribe leader invites an available student.
       allow create: if validInviteWrite(inviteId);
 
