@@ -1,7 +1,7 @@
 import { boot } from './_boot.js';
 import { h, clear } from '../core/dom.js';
 import { icon } from '../core/icons.js';
-import { field, input, select, textarea, toast, banner, busy } from '../core/ui.js';
+import { field, input, passwordToggle, select, textarea, toast, banner, busy } from '../core/ui.js';
 import { register } from '../core/auth.js';
 import { friendlyError, configured } from '../core/firebase.js';
 import { validateEmail, validateUsername, passwordIssues, validateProfile } from '../lib/validators.js';
@@ -26,6 +26,7 @@ boot({ require: 'public' }, async (ctx) => {
   const meter = h('div', { class: 'pw-meter' }, h('i'));
   const fName = field('Full name', name, { required: true }); const fUser = field('Username', username, { required: true, hint: 'Lowercase letters, numbers and _ . This is how people find you.' });
   const fEmail = field('Email', email, { required: true }); const fPw = field('Password', pw, { required: true });
+  const pwWrap = h('div', { class: 'password-wrap' }, passwordToggle(pw)); pw.replaceWith(pwWrap); pwWrap.prepend(pw);
   pw.addEventListener('input', () => { const n = 4 - passwordIssues(pw.value).length * 1.5 - (pw.value.length < 12 ? 1 : 0); meter.firstChild.style.width = `${Math.max(0, Math.min(100, (pw.value.length / 12) * 60 + (passwordIssues(pw.value).length ? 0 : 40)))}%`; });
   username.addEventListener('input', debounce(async () => {
     username.value = username.value.toLowerCase().replace(/[^a-z0-9_]/g, ''); const e = validateUsername(username.value);

@@ -1,7 +1,7 @@
 import { boot } from './_boot.js';
 import { h, clear, qs } from '../core/dom.js';
 import { icon } from '../core/icons.js';
-import { field, input, toast, banner, busy } from '../core/ui.js';
+import { field, input, passwordToggle, toast, banner, busy } from '../core/ui.js';
 import { login, resetPassword, session } from '../core/auth.js';
 import { friendlyError, configured } from '../core/firebase.js';
 import { validateEmail } from '../lib/validators.js';
@@ -16,6 +16,7 @@ boot({ require: 'public' }, async (ctx) => {
   const email = input({ type: 'email', autocomplete: 'email', inputmode: 'email', placeholder: 'you@example.com' });
   const pw = input({ type: 'password', autocomplete: 'current-password', placeholder: 'Your password' });
   const fe = field('Email', email, { required: true }); const fp = field('Password', pw, { required: true });
+  const pwWrap = h('div', { class: 'password-wrap' }, passwordToggle(pw)); pw.replaceWith(pwWrap); pwWrap.prepend(pw);
   const msg = h('div', {});
   if (qs().get('verified')) msg.append(banner('Thanks! If you confirmed your email, you can log in now.', 'ok'));
   if (!configured) msg.append(banner('Firebase is not configured yet (see README). Login will not work until it is.', 'warn'));

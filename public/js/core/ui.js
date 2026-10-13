@@ -75,6 +75,17 @@ export function field(label, control, { hint, error, required } = {}) {
   return wrap;
 }
 export const input = (props = {}) => h('input', { class: 'input', ...props });
+export function passwordToggle(control) {
+  const button = h('button', { class: 'password-toggle', type: 'button', 'aria-label': 'Show password', title: 'Show password', 'aria-pressed': 'false' }, icon('eye', 18));
+  button.addEventListener('click', () => {
+    const visible = control.type === 'password';
+    control.type = visible ? 'text' : 'password';
+    button.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+    button.setAttribute('title', visible ? 'Hide password' : 'Show password');
+    button.setAttribute('aria-pressed', String(visible));
+  });
+  return button;
+}
 export const textarea = (props = {}) => h('textarea', { class: 'input textarea', rows: 3, ...props });
 export function select(options, { value, ...props } = {}) {
   const s = h('select', { class: 'input select', ...props }, options.map((o) => { const v = typeof o === 'object' ? o.value : o; const l = typeof o === 'object' ? o.label : o; return h('option', { value: v }, l); }));
