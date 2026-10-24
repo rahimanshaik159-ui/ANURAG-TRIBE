@@ -84,6 +84,7 @@ function footer() {
     h('div', { class: 'foot-brand' }, h('img', { src: 'assets/logo/anurag-tribe-logo.png', alt: 'ANURAG TRIBE', width: 72, height: 72, loading: 'lazy' }), h('p', {}, 'One Campus. Many Minds. One Tribe.'), h('p', { class: 'muted' }, 'Connect. Discover. Build. Share. Grow.')),
     h('div', { class: 'foot-col' }, h('h4', {}, 'Explore'), ...[['students.html', 'Students'], ['tribes.html', 'Tribes'], ['projects.html', 'Projects'], ['events.html', 'Events']].map(([a, b]) => h('a', { href: a }, b))),
     h('div', { class: 'foot-col' }, h('h4', {}, 'Community'), ...[['about.html', 'About'], ['resources.html', 'Resources'], ['showcase.html', 'Showcase'], ['ideas.html', 'Ideas']].map(([a, b]) => h('a', { href: a }, b))),
+    h('div', { class: 'foot-col' }, h('h4', {}, 'Information'), ...[['contact.html', 'Contact Us'], ['privacy.html', 'Privacy Policy'], ['terms.html', 'Terms of Service'], ['guidelines.html', 'Community Guidelines']].map(([a, b]) => h('a', { href: a }, b))),
     h('div', { class: 'foot-col foot-note' }, h('h4', {}, 'Your files, your control'), h('p', { class: 'muted' }, 'Large files move directly from student to student after the recipient accepts. ANURAG TRIBE never stores them.'))),
     h('div', { class: 'container foot-copy' }, `© ${new Date().getFullYear()} ANURAG TRIBE`));
 }

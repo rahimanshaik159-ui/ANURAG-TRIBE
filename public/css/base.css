@@ -82,7 +82,7 @@ main { min-height: 60vh; }
 /* ------------------------------------------------------------ footer */
 .site-footer { background: var(--ink); color: #d6d6dc; margin-top: 40px; }
 .site-footer h4 { color: #fff; font-size: .95rem; } .site-footer a:hover { color: #fff; }
-.footer-in { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1.4fr; gap: 28px; padding: 44px 0 24px; }
+.footer-in { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1.4fr; gap: 28px; padding: 44px 0 24px; }
 .foot-brand img { border-radius: 50%; background: #fff; margin-bottom: 10px; } .foot-brand p { margin: 0 0 4px; } .site-footer .muted { color: #9a9aa6; }
 .foot-col { display: flex; flex-direction: column; gap: 8px; font-size: .92rem; }
 .foot-copy { padding: 16px 0 28px; border-top: 1px solid var(--ink-3); font-size: .85rem; color: #9a9aa6; }

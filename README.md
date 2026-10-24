@@ -42,6 +42,7 @@ cp functions/.env.example functions/.env      # APP_URL, SUPER_ADMIN_UID, EMAIL_
 firebase functions:secrets:set RESEND_API_KEY        # or enter:  unset   (emails are then logged as not_configured)
 ```
 
+
 ### Deploy
 ```bash
 firebase deploy --only firestore        # rules + indexes (indexes take a few minutes to build)
